@@ -16,9 +16,12 @@ export default async function LeadDetailPage({ params }: { params: Promise<{ id:
   const { id } = await params;
   const leadId = Number(id);
   if (!leadId) notFound();
-  const [lead, lookups] = await Promise.all([getLeadById(session, leadId), getLookups()]);
+  const [lead, lookups, activities] = await Promise.all([
+    getLeadById(session, leadId),
+    getLookups(),
+    getLeadActivities(leadId),
+  ]);
   if (!lead) notFound();
-  const activities = await getLeadActivities(lead.Id);
   const name = fullName(lead.FirstName, lead.LastName);
 
   return (

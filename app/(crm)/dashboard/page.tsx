@@ -1,12 +1,25 @@
 import Link from "next/link";
+import nextDynamic from "next/dynamic";
 import { after } from "next/server";
 import { Eye, Pencil } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
-import { DashboardCharts } from "@/components/dashboard/charts";
 import { StatusBadge, PriorityBadge } from "@/components/ui/badges";
 import { requireAuth } from "@/lib/auth";
 import { getDashboardData, syncFollowUpReminders } from "@/lib/queries/dashboard";
 import { formatDate, fullName, toTimeString } from "@/lib/utils";
+
+const DashboardCharts = nextDynamic(
+  () => import("@/components/dashboard/charts").then((mod) => mod.DashboardCharts),
+  {
+    loading: () => (
+      <div className="grid gap-4 xl:grid-cols-2">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="ifra-card h-[280px] animate-pulse bg-slate-100 dark:bg-white/5" />
+        ))}
+      </div>
+    ),
+  },
+);
 
 export const dynamic = "force-dynamic";
 

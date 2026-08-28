@@ -37,9 +37,9 @@ function getConfig(): sql.config {
       useUTC: true,
     },
     pool: {
-      max: 12,
-      min: 0,
-      idleTimeoutMillis: 10000,
+      max: 16,
+      min: 2,
+      idleTimeoutMillis: 60000,
       acquireTimeoutMillis: 8000,
     },
     connectionTimeout: 8000,

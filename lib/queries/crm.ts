@@ -54,7 +54,11 @@ export async function getFollowUpBuckets(session: SessionUser) {
      ORDER BY f.FollowUpDate DESC, f.FollowUpTime DESC`,
     scope.params,
   );
-  const mapped = rows.map((r) => ({ ...r, FollowUpTime: toTimeString(r.FollowUpTime) }));
+  const mapped = rows.map((r) => ({
+    ...r,
+    FollowUpTime: toTimeString(r.FollowUpTime),
+    Bucket: String(r.Bucket || ""),
+  }));
   return {
     today: mapped.filter((r) => r.Bucket === "today"),
     upcoming: mapped.filter((r) => r.Bucket === "upcoming"),
@@ -193,12 +197,13 @@ export async function getAuditLogs(page = 1, pageSize = 50, q?: string) {
     params.q = { type: sql.NVarChar(150), value: `%${q}%` };
     where = ` WHERE a.Action LIKE @q OR a.Module LIKE @q OR a.Description LIKE @q OR u.Name LIKE @q`;
   }
-  const count = await query<{ Total: number }>(
-    `SELECT COUNT(*) AS Total FROM AuditLogs a LEFT JOIN Users u ON u.Id = a.UserId ${where}`,
-    params,
-  );
-  const rows = await query(
-    `SELECT a.Id, a.Action, a.Module, a.RecordId, a.Description,
+  const [count, rows] = await Promise.all([
+    query<{ Total: number }>(
+      `SELECT COUNT(*) AS Total FROM AuditLogs a LEFT JOIN Users u ON u.Id = a.UserId ${where}`,
+      params,
+    ),
+    query(
+      `SELECT a.Id, a.Action, a.Module, a.RecordId, a.Description,
             CONVERT(varchar(45), a.IPAddress) AS IPAddress,
             CONVERT(varchar(19), a.CreatedAt, 120) AS CreatedAt,
             u.Name AS UserName
@@ -207,7 +212,8 @@ export async function getAuditLogs(page = 1, pageSize = 50, q?: string) {
      ${where}
      ORDER BY a.CreatedAt DESC
      OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY`,
-    params,
-  );
+      params,
+    ),
+  ]);
   return { rows, total: count[0]?.Total || 0, page, pageSize };
 }

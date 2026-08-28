@@ -7,7 +7,7 @@ import { Bell, LogOut, Menu, Moon, Search, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { roleLabel } from "@/lib/permissions";
 import { formatDateTime } from "@/lib/utils";
-import { markNotificationsReadAction } from "@/app/actions/crm";
+import { loadNavbarNotificationsAction, markNotificationsReadAction } from "@/app/actions/crm";
 import { logoutAction } from "@/app/actions/auth";
 import type { SessionUser } from "@/types";
 
@@ -21,13 +21,9 @@ type Note = {
 
 export function Navbar({
   user,
-  notifications,
-  unread,
   onMenu,
 }: {
   user: SessionUser;
-  notifications: Note[];
-  unread: number;
   onMenu: () => void;
 }) {
   const router = useRouter();
@@ -36,10 +32,31 @@ export function Navbar({
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState(searchParams.get("q") || "");
   const [pending, start] = useTransition();
+  const [notifications, setNotifications] = useState<Note[]>([]);
+  const [unread, setUnread] = useState(0);
 
   useEffect(() => {
     setQ(searchParams.get("q") || "");
   }, [searchParams]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadNavbarNotificationsAction()
+      .then((feed) => {
+        if (cancelled) return;
+        setNotifications(feed.notifications);
+        setUnread(feed.unread);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNotifications([]);
+          setUnread(0);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <header className="sticky top-0 z-20 flex items-center gap-2 border-b border-slate-200 bg-white/90 px-3 py-2.5 backdrop-blur sm:gap-3 sm:px-4 sm:py-3 dark:border-white/10 dark:bg-ifra-navy/80">
@@ -98,7 +115,8 @@ export function Navbar({
                   onClick={() =>
                     start(async () => {
                       await markNotificationsReadAction();
-                      router.refresh();
+                      setNotifications((rows) => rows.map((n) => ({ ...n, IsRead: true })));
+                      setUnread(0);
                     })
                   }
                 >
@@ -116,8 +134,11 @@ export function Navbar({
                       onClick={() =>
                         start(async () => {
                           await markNotificationsReadAction(n.Id);
+                          setNotifications((rows) =>
+                            rows.map((row) => (row.Id === n.Id ? { ...row, IsRead: true } : row)),
+                          );
+                          setUnread((count) => Math.max(0, count - (n.IsRead ? 0 : 1)));
                           setOpen(false);
-                          router.refresh();
                         })
                       }
                     >

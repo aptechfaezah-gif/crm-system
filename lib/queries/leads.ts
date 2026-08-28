@@ -34,7 +34,10 @@ const LEAD_FROM = `
   LEFT JOIN Users conv ON conv.Id = l.ConvertedBy
 `;
 
-export async function getLookups() {
+let lookupsCache: { value: Awaited<ReturnType<typeof fetchLookups>>; expires: number } | null = null;
+const LOOKUPS_TTL_MS = 60_000;
+
+async function fetchLookups() {
   const [services, sources, statuses, users] = await Promise.all([
     query<{ Id: number; Name: string; Status: string }>(
       `SELECT Id, Name, Status FROM Services ORDER BY Name`,
@@ -50,6 +53,17 @@ export async function getLookups() {
     ),
   ]);
   return { services, sources, statuses, users };
+}
+
+export function invalidateLookupsCache() {
+  lookupsCache = null;
+}
+
+export async function getLookups() {
+  if (lookupsCache && lookupsCache.expires > Date.now()) return lookupsCache.value;
+  const value = await fetchLookups();
+  lookupsCache = { value, expires: Date.now() + LOOKUPS_TTL_MS };
+  return value;
 }
 
 type CompanySettings = {
@@ -79,10 +93,15 @@ const DEFAULT_SETTINGS: CompanySettings = {
 };
 
 let settingsCache: { value: CompanySettings; expires: number } | null = null;
-const SETTINGS_TTL_MS = 60_000;
+const SETTINGS_TTL_MS = 5 * 60_000;
 
 export function invalidateSettingsCache() {
   settingsCache = null;
+}
+
+export function peekSettings() {
+  if (settingsCache && settingsCache.expires > Date.now()) return settingsCache.value;
+  return null;
 }
 
 export async function getSettings() {
@@ -184,8 +203,12 @@ export async function searchLeads(session: SessionUser, filters: LeadFilters) {
     where += ` AND l.CreatedAt < DATEADD(DAY, 1, @dateTo)`;
   }
 
+  const countFrom = filters.q?.trim()
+    ? `FROM Leads l LEFT JOIN Users u ON u.Id = l.AssignedTo`
+    : `FROM Leads l`;
+
   const [countRows, rows] = await Promise.all([
-    query<{ Total: number }>(`SELECT COUNT(*) AS Total ${LEAD_FROM} ${where}`, params),
+    query<{ Total: number }>(`SELECT COUNT(*) AS Total ${countFrom} ${where}`, params),
     query(
       `SELECT ${LEAD_SELECT} ${LEAD_FROM} ${where}
        ORDER BY l.CreatedAt DESC

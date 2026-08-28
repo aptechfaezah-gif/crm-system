@@ -1,6 +1,7 @@
 import { jwtVerify } from "jose";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { SESSION_HEADER, encodeSessionHeader, sessionFromClaims } from "@/lib/session-payload";
 
 const COOKIE = "ifra_crm_session";
 const PUBLIC_PATHS = new Set(["/login"]);
@@ -41,12 +42,17 @@ export async function middleware(request: NextRequest) {
 
   if (token) {
     try {
-      await jwtVerify(token, getSecret());
-      authenticated = true;
+      const { payload } = await jwtVerify(token, getSecret());
+      const session = sessionFromClaims(payload);
+      if (session) {
+        authenticated = true;
+        requestHeaders.set(SESSION_HEADER, encodeSessionHeader(session));
+      }
     } catch {
       authenticated = false;
     }
   }
+  if (!authenticated) requestHeaders.delete(SESSION_HEADER);
 
   if (pathname === "/") {
     const url = request.nextUrl.clone();

@@ -1,12 +1,13 @@
 import { cache } from "react";
 import { after } from "next/server";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { sql, query, execute } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { persistClientIp, resolveClientIp, clearClientIp } from "@/lib/client-ip";
+import { decodeSessionHeader, SESSION_HEADER, sessionFromClaims } from "@/lib/session-payload";
 import { safeErrorMessage } from "@/lib/utils";
 import { loginSchema } from "@/lib/validation";
 import type { SessionUser, UserRole } from "@/types";
@@ -96,6 +97,9 @@ export async function login(formData: FormData): Promise<{ error?: string }> {
       role: user.Role,
       username: user.Username,
       name: user.Name,
+      email: user.Email,
+      phone: user.Phone || "",
+      profileImage: user.ProfileImage || "",
     })
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
@@ -112,6 +116,16 @@ export async function login(formData: FormData): Promise<{ error?: string }> {
       maxAge: sessionHours() * 60 * 60,
     });
     await persistClientIp(ip, sessionHours() * 60 * 60);
+    rememberSession({
+      id: user.Id,
+      name: user.Name,
+      username: user.Username,
+      email: user.Email,
+      phone: user.Phone,
+      role: user.Role,
+      profileImage: user.ProfileImage,
+      status: user.Status,
+    });
 
     runAfterResponse(async () => {
       await execute(
@@ -142,6 +156,7 @@ export async function logout() {
   jar.set(COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 });
   await clearClientIp();
   if (session) {
+    invalidateSessionCache(session.id);
     await writeAuditLog({
       userId: session.id,
       action: "Logout",
@@ -153,44 +168,146 @@ export async function logout() {
   }
 }
 
-export const getSession = cache(async (): Promise<SessionUser | null> => {
-  const jar = await cookies();
-  const token = jar.get(COOKIE)?.value;
-  if (!token) return null;
+const SESSION_TTL_MS = 45_000;
+const sessionCache = new Map<number, { user: SessionUser; expires: number }>();
+const revokedUsers = new Set<number>();
+const statusRefreshAt = new Map<number, number>();
 
+export function invalidateSessionCache(userId?: number) {
+  if (typeof userId === "number") {
+    sessionCache.delete(userId);
+    statusRefreshAt.delete(userId);
+    return;
+  }
+  sessionCache.clear();
+  revokedUsers.clear();
+  statusRefreshAt.clear();
+}
+
+export function revokeSession(userId: number) {
+  sessionCache.delete(userId);
+  revokedUsers.add(userId);
+  statusRefreshAt.delete(userId);
+}
+
+export function restoreSession(userId: number) {
+  revokedUsers.delete(userId);
+  sessionCache.delete(userId);
+  statusRefreshAt.delete(userId);
+}
+
+function rememberSession(user: SessionUser) {
+  revokedUsers.delete(user.id);
+  sessionCache.set(user.id, { user, expires: Date.now() + SESSION_TTL_MS });
+}
+
+function mapDbUser(user: {
+  Id: number;
+  Name: string;
+  Username: string;
+  Email: string;
+  Phone: string | null;
+  Role: UserRole;
+  ProfileImage: string | null;
+  Status: "Active" | "Inactive";
+}): SessionUser {
+  return {
+    id: user.Id,
+    name: user.Name,
+    username: user.Username,
+    email: user.Email,
+    phone: user.Phone,
+    role: user.Role,
+    profileImage: user.ProfileImage,
+    status: user.Status,
+  };
+}
+
+async function loadUserFromDb(id: number): Promise<SessionUser | null> {
+  const users = await query<{
+    Id: number;
+    Name: string;
+    Username: string;
+    Email: string;
+    Phone: string | null;
+    Role: UserRole;
+    ProfileImage: string | null;
+    Status: "Active" | "Inactive";
+  }>(
+    `SELECT TOP 1 Id, Name, Username, Email, Phone, Role, ProfileImage, Status
+     FROM Users WHERE Id = @id`,
+    { id: { type: sql.Int, value: id } },
+  );
+  const user = users[0];
+  if (!user || user.Status !== "Active") {
+    revokedUsers.add(id);
+    sessionCache.delete(id);
+    return null;
+  }
+  const mapped = mapDbUser(user);
+  rememberSession(mapped);
+  return mapped;
+}
+
+function scheduleStatusRefresh(id: number) {
+  const last = statusRefreshAt.get(id) || 0;
+  if (Date.now() - last < SESSION_TTL_MS) return;
+  statusRefreshAt.set(id, Date.now());
+  runAfterResponse(async () => {
+    try {
+      await loadUserFromDb(id);
+    } catch {
+      statusRefreshAt.delete(id);
+    }
+  });
+}
+
+async function clearSessionCookie() {
   try {
+    const jar = await cookies();
+    jar.set(COOKIE, "", { httpOnly: true, path: "/", maxAge: 0 });
+  } catch {
+    // cookies may be read-only in some render paths
+  }
+}
+
+export const getSession = cache(async (): Promise<SessionUser | null> => {
+  try {
+    const headerUser = decodeSessionHeader((await headers()).get(SESSION_HEADER));
+    if (headerUser) {
+      if (revokedUsers.has(headerUser.id)) {
+        await clearSessionCookie();
+        return null;
+      }
+      const cached = sessionCache.get(headerUser.id);
+      if (cached && cached.expires > Date.now()) return cached.user;
+      rememberSession(headerUser);
+      scheduleStatusRefresh(headerUser.id);
+      return headerUser;
+    }
+
+    const jar = await cookies();
+    const token = jar.get(COOKIE)?.value;
+    if (!token) return null;
+
     const { payload } = await jwtVerify(token, getSecret());
-    const id = Number(payload.sub);
+    const fromJwt = sessionFromClaims(payload);
+    const id = fromJwt?.id || Number(payload.sub);
     if (!id) return null;
+    if (revokedUsers.has(id)) {
+      await clearSessionCookie();
+      return null;
+    }
 
-    const users = await query<{
-      Id: number;
-      Name: string;
-      Username: string;
-      Email: string;
-      Phone: string | null;
-      Role: UserRole;
-      ProfileImage: string | null;
-      Status: "Active" | "Inactive";
-    }>(
-      `SELECT TOP 1 Id, Name, Username, Email, Phone, Role, ProfileImage, Status
-       FROM Users WHERE Id = @id`,
-      { id: { type: sql.Int, value: id } },
-    );
+    const cached = sessionCache.get(id);
+    if (cached && cached.expires > Date.now()) return cached.user;
+    if (fromJwt) {
+      rememberSession(fromJwt);
+      scheduleStatusRefresh(id);
+      return fromJwt;
+    }
 
-    const user = users[0];
-    if (!user || user.Status !== "Active") return null;
-
-    return {
-      id: user.Id,
-      name: user.Name,
-      username: user.Username,
-      email: user.Email,
-      phone: user.Phone,
-      role: user.Role,
-      profileImage: user.ProfileImage,
-      status: user.Status,
-    };
+    return loadUserFromDb(id);
   } catch {
     return null;
   }

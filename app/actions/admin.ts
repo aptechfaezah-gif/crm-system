@@ -11,7 +11,8 @@ import { resolveClientIp } from "@/lib/client-ip";
 import { safeErrorMessage } from "@/lib/utils";
 import { assertPermission, hasPermission } from "@/lib/permissions";
 import { lookupSchema, settingsSchema, userSchema } from "@/lib/validation";
-import { invalidateSettingsCache } from "@/lib/queries/leads";
+import { invalidateSettingsCache, invalidateLookupsCache } from "@/lib/queries/leads";
+import { invalidateSessionCache, restoreSession, revokeSession } from "@/lib/auth";
 import type { ActionResult } from "@/types";
 
 async function saveCompanyLogoFile(file: File): Promise<string> {
@@ -65,6 +66,7 @@ export async function createUserAction(raw: Record<string, unknown>): Promise<Ac
       },
     );
     await audit(session.id, "User Created", "Users", null, `${session.name} created user ${data.username}`);
+    invalidateLookupsCache();
     revalidatePath("/users");
     return { success: true };
   } catch (error) {
@@ -96,6 +98,8 @@ export async function updateUserAction(id: number, raw: Record<string, unknown>)
       },
     );
     await audit(session.id, "User Updated", "Users", id, `${session.name} updated user ${data.username}`);
+    invalidateLookupsCache();
+    invalidateSessionCache(id);
     revalidatePath("/users");
     return { success: true };
   } catch (error) {
@@ -115,6 +119,9 @@ export async function setUserStatusAction(id: number, status: "Active" | "Inacti
       status: { type: sql.NVarChar(20), value: status },
     });
     await audit(session.id, "User Updated", "Users", id, `${session.name} set user status to ${status}`);
+    invalidateLookupsCache();
+    if (status === "Inactive") revokeSession(id);
+    else restoreSession(id);
     revalidatePath("/users");
     return { success: true };
   } catch (error) {
@@ -179,6 +186,7 @@ export async function saveLookupAction(
       }
       revalidatePath("/lead-sources");
     }
+    invalidateLookupsCache();
     return { success: true };
   } catch (error) {
     return { success: false, error: safeErrorMessage(error, "Unable to save record.") };
@@ -205,6 +213,7 @@ export async function setLookupStatusAction(
       });
     }
     revalidatePath(table === "Services" ? "/services" : "/lead-sources");
+    invalidateLookupsCache();
     return { success: true };
   } catch (error) {
     return { success: false, error: safeErrorMessage(error, "Unable to update status.") };

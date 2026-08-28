@@ -20,6 +20,7 @@ import {
   taskSchema,
 } from "@/lib/validation";
 import { getLeadById } from "@/lib/queries/leads";
+import { getNotifications } from "@/lib/queries/crm";
 import type { ActionResult } from "@/types";
 
 async function audit(userId: number, action: string, module: string, recordId: number | null, description: string) {
@@ -663,4 +664,23 @@ export async function markNotificationsReadAction(id?: number): Promise<ActionRe
   } catch (error) {
     return { success: false, error: safeErrorMessage(error) };
   }
+}
+
+export async function loadNavbarNotificationsAction(): Promise<{
+  notifications: Array<{ Id: number; Title: string; Message: string; IsRead: boolean; CreatedAt: string }>;
+  unread: number;
+}> {
+  const session = await requireAuth();
+  const rows = await getNotifications(session.id);
+  const notifications = rows as Array<{
+    Id: number;
+    Title: string;
+    Message: string;
+    IsRead: boolean;
+    CreatedAt: string;
+  }>;
+  return {
+    notifications,
+    unread: notifications.reduce((sum, row) => sum + (row.IsRead ? 0 : 1), 0),
+  };
 }

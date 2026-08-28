@@ -6,6 +6,10 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["mssql", "tedious", "bcryptjs"],
   experimental: {
     optimizePackageImports: ["lucide-react", "recharts", "date-fns"],
+    staleTimes: {
+      dynamic: 60,
+      static: 180,
+    },
   },
 };
 
