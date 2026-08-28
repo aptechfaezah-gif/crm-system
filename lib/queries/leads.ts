@@ -52,33 +52,45 @@ export async function getLookups() {
   return { services, sources, statuses, users };
 }
 
+type CompanySettings = {
+  Id: number;
+  CompanyName: string;
+  CompanyLogo: string | null;
+  CompanyEmail: string | null;
+  CompanyPhone: string | null;
+  CompanyWebsite: string | null;
+  DefaultCurrency: string;
+  Timezone: string;
+  LeadCodePrefix: string;
+  ProposalPrefix: string;
+};
+
+const DEFAULT_SETTINGS: CompanySettings = {
+  Id: 1,
+  CompanyName: "IFRA Consulting (Pvt) Ltd.",
+  CompanyLogo: "/images/logo.png",
+  CompanyEmail: "info@ifraconsulting.com",
+  CompanyPhone: "",
+  CompanyWebsite: "",
+  DefaultCurrency: "PKR",
+  Timezone: "Asia/Karachi",
+  LeadCodePrefix: "IFRA-",
+  ProposalPrefix: "IFRA-P-",
+};
+
+let settingsCache: { value: CompanySettings; expires: number } | null = null;
+const SETTINGS_TTL_MS = 60_000;
+
+export function invalidateSettingsCache() {
+  settingsCache = null;
+}
+
 export async function getSettings() {
-  const rows = await query<{
-    Id: number;
-    CompanyName: string;
-    CompanyLogo: string | null;
-    CompanyEmail: string | null;
-    CompanyPhone: string | null;
-    CompanyWebsite: string | null;
-    DefaultCurrency: string;
-    Timezone: string;
-    LeadCodePrefix: string;
-    ProposalPrefix: string;
-  }>(`SELECT TOP 1 * FROM Settings WHERE Id = 1`);
-  return (
-    rows[0] || {
-      Id: 1,
-      CompanyName: "IFRA Consulting (Pvt) Ltd.",
-      CompanyLogo: "/images/logo.png",
-      CompanyEmail: "info@ifraconsulting.com",
-      CompanyPhone: "",
-      CompanyWebsite: "",
-      DefaultCurrency: "PKR",
-      Timezone: "Asia/Karachi",
-      LeadCodePrefix: "IFRA-",
-      ProposalPrefix: "IFRA-P-",
-    }
-  );
+  if (settingsCache && settingsCache.expires > Date.now()) return settingsCache.value;
+  const rows = await query<CompanySettings>(`SELECT TOP 1 * FROM Settings WHERE Id = 1`);
+  const value = rows[0] || DEFAULT_SETTINGS;
+  settingsCache = { value, expires: Date.now() + SETTINGS_TTL_MS };
+  return value;
 }
 
 export type LeadFilters = {
@@ -111,28 +123,25 @@ export async function searchLeads(session: SessionUser, filters: LeadFilters) {
 
   let where = ` WHERE l.IsDeleted = 0 ${scope.clause}`;
 
-  if (filters.q) {
+  if (filters.q?.trim()) {
     const terms = filters.q
       .trim()
       .split(/\s+/)
       .filter(Boolean)
       .slice(0, 6);
-    const blob = `CONCAT(
-      l.FirstName, N' ', ISNULL(l.LastName, N''), N' ',
-      ISNULL(l.CompanyName, N''), N' ',
-      l.Email, N' ', l.Phone, N' ', ISNULL(l.WhatsApp, N''), N' ',
-      l.LeadCode, N' ', ISNULL(u.Name, N'')
-    )`;
     const phrase = filters.q.trim();
     params.q = { type: sql.NVarChar(150), value: `%${phrase}%` };
-    const wordClauses = terms.map((_, i) => {
-      params[`q${i}`] = { type: sql.NVarChar(80), value: `%${terms[i]}%` };
-      return `${blob} LIKE @q${i}`;
-    });
-    where += ` AND (
-      ${blob} LIKE @q
-      OR (${wordClauses.join(" AND ")})
-    )`;
+    const searchable = `(l.LeadCode LIKE @q OR l.Email LIKE @q OR l.Phone LIKE @q OR l.WhatsApp LIKE @q
+      OR l.FirstName LIKE @q OR l.LastName LIKE @q OR l.CompanyName LIKE @q OR u.Name LIKE @q)`;
+    if (terms.length > 1) {
+      const wordClauses = terms.map((_, i) => {
+        params[`q${i}`] = { type: sql.NVarChar(80), value: `%${terms[i]}%` };
+        return `(l.FirstName LIKE @q${i} OR l.LastName LIKE @q${i} OR l.CompanyName LIKE @q${i} OR l.LeadCode LIKE @q${i})`;
+      });
+      where += ` AND (${searchable} OR (${wordClauses.join(" AND ")}))`;
+    } else {
+      where += ` AND ${searchable}`;
+    }
   }
   if (filters.statusId) {
     params.statusId = { type: sql.Int, value: filters.statusId };
@@ -167,24 +176,23 @@ export async function searchLeads(session: SessionUser, filters: LeadFilters) {
     where += ` AND l.City LIKE @city`;
   }
   if (filters.dateFrom) {
-    params.dateFrom = { type: sql.Date, value: filters.dateFrom };
-    where += ` AND CAST(l.CreatedAt AS DATE) >= @dateFrom`;
+    params.dateFrom = { type: sql.DateTime, value: filters.dateFrom };
+    where += ` AND l.CreatedAt >= @dateFrom`;
   }
   if (filters.dateTo) {
-    params.dateTo = { type: sql.Date, value: filters.dateTo };
-    where += ` AND CAST(l.CreatedAt AS DATE) <= @dateTo`;
+    params.dateTo = { type: sql.DateTime, value: filters.dateTo };
+    where += ` AND l.CreatedAt < DATEADD(DAY, 1, @dateTo)`;
   }
 
-  const countRows = await query<{ Total: number }>(
-    `SELECT COUNT(*) AS Total ${LEAD_FROM} ${where}`,
-    params,
-  );
-  const rows = await query(
-    `SELECT ${LEAD_SELECT} ${LEAD_FROM} ${where}
-     ORDER BY l.CreatedAt DESC
-     OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY`,
-    params,
-  );
+  const [countRows, rows] = await Promise.all([
+    query<{ Total: number }>(`SELECT COUNT(*) AS Total ${LEAD_FROM} ${where}`, params),
+    query(
+      `SELECT ${LEAD_SELECT} ${LEAD_FROM} ${where}
+       ORDER BY l.CreatedAt DESC
+       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY`,
+      params,
+    ),
+  ]);
 
   return {
     rows: rows.map(normalizeLead),
@@ -224,15 +232,22 @@ export async function getLeadActivities(leadId: number) {
 
 export async function getPipeline(session: SessionUser) {
   const scope = leadScope(session);
-  const statuses = await query<{ Id: number; Name: string; SortOrder: number }>(
-    `SELECT Id, Name, SortOrder FROM LeadStatuses WHERE Name <> N'On Hold' ORDER BY SortOrder`,
-  );
-  const leads = await query(
-    `SELECT ${LEAD_SELECT} ${LEAD_FROM}
-     WHERE l.IsDeleted = 0 AND st.Name <> N'On Hold' ${scope.clause}
-     ORDER BY l.UpdatedAt DESC`,
-    scope.params,
-  );
+  const [statuses, leads] = await Promise.all([
+    query<{ Id: number; Name: string; SortOrder: number }>(
+      `SELECT Id, Name, SortOrder FROM LeadStatuses WHERE Name <> N'On Hold' ORDER BY SortOrder`,
+    ),
+    query(
+      `SELECT TOP 400 l.Id, l.FirstName, l.LastName, l.CompanyName, l.Priority, l.LeadTemperature,
+              l.StatusId, l.NextFollowUpDate, s.Name AS ServiceName, u.Name AS AssignedName
+       FROM Leads l
+       INNER JOIN Services s ON s.Id = l.ServiceId
+       INNER JOIN LeadStatuses st ON st.Id = l.StatusId
+       LEFT JOIN Users u ON u.Id = l.AssignedTo
+       WHERE l.IsDeleted = 0 AND st.Name <> N'On Hold' ${scope.clause}
+       ORDER BY l.UpdatedAt DESC`,
+      scope.params,
+    ),
+  ]);
   return {
     statuses,
     leads: leads.map(normalizeLead),

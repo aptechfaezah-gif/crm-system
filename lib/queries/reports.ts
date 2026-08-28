@@ -8,12 +8,12 @@ export async function getReports(session: SessionUser, dateFrom?: string, dateTo
   const params: Record<string, SqlParam> = { ...scope.params };
   let dateClause = "";
   if (dateFrom) {
-    params.dateFrom = { type: sql.Date, value: dateFrom };
-    dateClause += " AND CAST(l.CreatedAt AS DATE) >= @dateFrom";
+    params.dateFrom = { type: sql.DateTime, value: dateFrom };
+    dateClause += " AND l.CreatedAt >= @dateFrom";
   }
   if (dateTo) {
-    params.dateTo = { type: sql.Date, value: dateTo };
-    dateClause += " AND CAST(l.CreatedAt AS DATE) <= @dateTo";
+    params.dateTo = { type: sql.DateTime, value: dateTo };
+    dateClause += " AND l.CreatedAt < DATEADD(DAY, 1, @dateTo)";
   }
 
   const [status, employees, sources, services, lost, monthly] = await Promise.all([
@@ -35,17 +35,20 @@ export async function getReports(session: SessionUser, dateFrom?: string, dateTo
       Lost: number;
     }>(
       `SELECT u.Name,
-              COUNT(*) AS Assigned,
+              COUNT(l.Id) AS Assigned,
               SUM(CASE WHEN st.Name = N'Contacted' THEN 1 ELSE 0 END) AS Contacted,
               SUM(CASE WHEN st.Name = N'Qualified' THEN 1 ELSE 0 END) AS Qualified,
-              (SELECT COUNT(*) FROM Proposals p WHERE p.CreatedBy = u.Id) AS Proposals,
+              ISNULL(pr.Total, 0) AS Proposals,
               SUM(CASE WHEN st.Name = N'Won' THEN 1 ELSE 0 END) AS Won,
               SUM(CASE WHEN st.Name = N'Lost' THEN 1 ELSE 0 END) AS Lost
        FROM Users u
-       LEFT JOIN Leads l ON l.AssignedTo = u.Id AND l.IsDeleted = 0 ${dateClause.replaceAll("l.CreatedAt", "l.CreatedAt")}
+       LEFT JOIN Leads l ON l.AssignedTo = u.Id AND l.IsDeleted = 0 ${dateClause}
        LEFT JOIN LeadStatuses st ON st.Id = l.StatusId
+       LEFT JOIN (
+         SELECT CreatedBy, COUNT(*) AS Total FROM Proposals GROUP BY CreatedBy
+       ) pr ON pr.CreatedBy = u.Id
        WHERE u.Role IN (N'SALES_MANAGER', N'SALES_EMPLOYEE', N'ADMIN')
-       GROUP BY u.Id, u.Name
+       GROUP BY u.Id, u.Name, pr.Total
        ORDER BY Assigned DESC`,
       params,
     ),
@@ -85,15 +88,15 @@ export async function getReports(session: SessionUser, dateFrom?: string, dateTo
       params,
     ),
     query<{ MonthLabel: string; Total: number; Won: number; Lost: number }>(
-      `SELECT FORMAT(l.CreatedAt, 'yyyy-MM') AS MonthLabel,
+      `SELECT CONCAT(YEAR(l.CreatedAt), N'-', RIGHT(CONCAT(N'0', MONTH(l.CreatedAt)), 2)) AS MonthLabel,
               COUNT(*) AS Total,
               SUM(CASE WHEN st.Name = N'Won' THEN 1 ELSE 0 END) AS Won,
               SUM(CASE WHEN st.Name = N'Lost' THEN 1 ELSE 0 END) AS Lost
        FROM Leads l
        INNER JOIN LeadStatuses st ON st.Id = l.StatusId
        WHERE l.IsDeleted = 0 ${scope.clause} ${dateClause}
-       GROUP BY FORMAT(l.CreatedAt, 'yyyy-MM')
-       ORDER BY MonthLabel`,
+       GROUP BY YEAR(l.CreatedAt), MONTH(l.CreatedAt)
+       ORDER BY YEAR(l.CreatedAt), MONTH(l.CreatedAt)`,
       params,
     ),
   ]);

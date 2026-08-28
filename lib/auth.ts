@@ -1,3 +1,5 @@
+import { cache } from "react";
+import { after } from "next/server";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import bcrypt from "bcryptjs";
@@ -8,6 +10,16 @@ import { persistClientIp, resolveClientIp, clearClientIp } from "@/lib/client-ip
 import { safeErrorMessage } from "@/lib/utils";
 import { loginSchema } from "@/lib/validation";
 import type { SessionUser, UserRole } from "@/types";
+
+function runAfterResponse(work: () => Promise<void>) {
+  try {
+    after(() => {
+      void work();
+    });
+  } catch {
+    void work();
+  }
+}
 
 const COOKIE = "ifra_crm_session";
 
@@ -62,13 +74,15 @@ export async function login(formData: FormData): Promise<{ error?: string }> {
 
     const ok = await bcrypt.compare(password, user.PasswordHash);
     if (!ok) {
-      await writeAuditLog({
-        userId: user.Id,
-        action: "Login Failed",
-        module: "Auth",
-        recordId: user.Id,
-        description: "Failed login attempt",
-        ipAddress: ip,
+      runAfterResponse(async () => {
+        await writeAuditLog({
+          userId: user.Id,
+          action: "Login Failed",
+          module: "Auth",
+          recordId: user.Id,
+          description: "Failed login attempt",
+          ipAddress: ip,
+        });
       });
       return { error: "Invalid username or password." };
     }
@@ -99,18 +113,19 @@ export async function login(formData: FormData): Promise<{ error?: string }> {
     });
     await persistClientIp(ip, sessionHours() * 60 * 60);
 
-    await execute(
-      `UPDATE Users SET LastLogin = GETDATE(), UpdatedAt = GETDATE() WHERE Id = @id`,
-      { id: { type: sql.Int, value: user.Id } },
-    );
-
-    await writeAuditLog({
-      userId: user.Id,
-      action: "Login",
-      module: "Auth",
-      recordId: user.Id,
-      description: `${user.Name} logged in`,
-      ipAddress: ip,
+    runAfterResponse(async () => {
+      await execute(
+        `UPDATE Users SET LastLogin = GETDATE(), UpdatedAt = GETDATE() WHERE Id = @id`,
+        { id: { type: sql.Int, value: user.Id } },
+      );
+      await writeAuditLog({
+        userId: user.Id,
+        action: "Login",
+        module: "Auth",
+        recordId: user.Id,
+        description: `${user.Name} logged in`,
+        ipAddress: ip,
+      });
     });
 
     return {};
@@ -138,7 +153,7 @@ export async function logout() {
   }
 }
 
-export async function getSession(): Promise<SessionUser | null> {
+export const getSession = cache(async (): Promise<SessionUser | null> => {
   const jar = await cookies();
   const token = jar.get(COOKIE)?.value;
   if (!token) return null;
@@ -179,7 +194,7 @@ export async function getSession(): Promise<SessionUser | null> {
   } catch {
     return null;
   }
-}
+});
 
 export async function requireAuth(): Promise<SessionUser> {
   const session = await getSession();

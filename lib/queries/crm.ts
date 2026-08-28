@@ -8,13 +8,19 @@ import type { SessionUser } from "@/types";
 export async function getFollowUps(session: SessionUser, bucket?: string) {
   const scope = leadScope(session);
   let extra = "";
-  if (bucket === "today") extra = ` AND CAST(f.FollowUpDate AS DATE) = CAST(GETDATE() AS DATE) AND f.Status = N'Pending'`;
-  if (bucket === "upcoming") extra = ` AND CAST(f.FollowUpDate AS DATE) > CAST(GETDATE() AS DATE) AND f.Status = N'Pending'`;
-  if (bucket === "overdue") extra = ` AND CAST(f.FollowUpDate AS DATE) < CAST(GETDATE() AS DATE) AND f.Status = N'Pending'`;
-  if (bucket === "completed") extra = ` AND f.Status = N'Completed'`;
+  if (bucket === "today") {
+    extra = ` AND f.Status = N'Pending' AND f.FollowUpDate >= CAST(GETDATE() AS DATE) AND f.FollowUpDate < DATEADD(DAY, 1, CAST(GETDATE() AS DATE))`;
+  }
+  if (bucket === "upcoming") {
+    extra = ` AND f.Status = N'Pending' AND f.FollowUpDate >= DATEADD(DAY, 1, CAST(GETDATE() AS DATE))`;
+  }
+  if (bucket === "overdue") {
+    extra = ` AND f.Status = N'Pending' AND f.FollowUpDate < CAST(GETDATE() AS DATE)`;
+  }
+  if (bucket === "completed") extra = ` AND f.Status = N'Completed' AND f.FollowUpDate >= DATEADD(DAY, -90, CAST(GETDATE() AS DATE))`;
 
   const rows = await query(
-    `SELECT f.Id, f.LeadId, f.UserId, f.FollowUpDate, f.FollowUpTime, f.FollowUpType, f.Subject, f.Notes, f.Status,
+    `SELECT ${bucket === "completed" ? "TOP 80" : "TOP 200"} f.Id, f.LeadId, f.UserId, f.FollowUpDate, f.FollowUpTime, f.FollowUpType, f.Subject, f.Notes, f.Status,
             l.LeadCode, l.FirstName, l.LastName, l.CompanyName, u.Name AS UserName
      FROM FollowUps f
      INNER JOIN Leads l ON l.Id = f.LeadId
@@ -24,6 +30,37 @@ export async function getFollowUps(session: SessionUser, bucket?: string) {
     scope.params,
   );
   return rows.map((r) => ({ ...r, FollowUpTime: toTimeString(r.FollowUpTime) }));
+}
+
+export async function getFollowUpBuckets(session: SessionUser) {
+  const scope = leadScope(session);
+  const rows = await query(
+    `SELECT TOP 400 f.Id, f.LeadId, f.UserId, f.FollowUpDate, f.FollowUpTime, f.FollowUpType, f.Subject, f.Notes, f.Status,
+            l.LeadCode, l.FirstName, l.LastName, l.CompanyName, u.Name AS UserName,
+            CASE
+              WHEN f.Status = N'Completed' THEN N'completed'
+              WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'overdue'
+              WHEN f.FollowUpDate < DATEADD(DAY, 1, CAST(GETDATE() AS DATE)) THEN N'today'
+              ELSE N'upcoming'
+            END AS Bucket
+     FROM FollowUps f
+     INNER JOIN Leads l ON l.Id = f.LeadId
+     INNER JOIN Users u ON u.Id = f.UserId
+     WHERE l.IsDeleted = 0 ${scope.clause}
+       AND (
+         f.Status = N'Pending'
+         OR (f.Status = N'Completed' AND f.FollowUpDate >= DATEADD(DAY, -90, CAST(GETDATE() AS DATE)))
+       )
+     ORDER BY f.FollowUpDate DESC, f.FollowUpTime DESC`,
+    scope.params,
+  );
+  const mapped = rows.map((r) => ({ ...r, FollowUpTime: toTimeString(r.FollowUpTime) }));
+  return {
+    today: mapped.filter((r) => r.Bucket === "today"),
+    upcoming: mapped.filter((r) => r.Bucket === "upcoming"),
+    overdue: mapped.filter((r) => r.Bucket === "overdue"),
+    completed: mapped.filter((r) => r.Bucket === "completed").slice(0, 80),
+  };
 }
 
 export async function getTasks(session: SessionUser) {
@@ -127,18 +164,20 @@ export async function getUserById(id: number) {
 
 export async function getServices() {
   return query(
-    `SELECT s.Id, s.Name, s.Description, s.Status, s.CreatedAt,
-            (SELECT COUNT(*) FROM Leads l WHERE l.ServiceId = s.Id AND l.IsDeleted = 0) AS LeadCount
+    `SELECT s.Id, s.Name, s.Description, s.Status, s.CreatedAt, COUNT(l.Id) AS LeadCount
      FROM Services s
+     LEFT JOIN Leads l ON l.ServiceId = s.Id AND l.IsDeleted = 0
+     GROUP BY s.Id, s.Name, s.Description, s.Status, s.CreatedAt
      ORDER BY s.Name`,
   );
 }
 
 export async function getSources() {
   return query(
-    `SELECT src.Id, src.Name, src.Status, src.CreatedAt,
-            (SELECT COUNT(*) FROM Leads l WHERE l.SourceId = src.Id AND l.IsDeleted = 0) AS LeadCount
+    `SELECT src.Id, src.Name, src.Status, src.CreatedAt, COUNT(l.Id) AS LeadCount
      FROM LeadSources src
+     LEFT JOIN Leads l ON l.SourceId = src.Id AND l.IsDeleted = 0
+     GROUP BY src.Id, src.Name, src.Status, src.CreatedAt
      ORDER BY src.Name`,
   );
 }

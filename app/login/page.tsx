@@ -3,13 +3,18 @@ import { getSettings } from "@/lib/queries/leads";
 
 export const dynamic = "force-dynamic";
 
+const DEFAULT_LOGO = "/images/logo.png";
+
 export default async function LoginPage() {
-  let logoSrc = "/images/logo.png";
+  let logoSrc = DEFAULT_LOGO;
   try {
-    const settings = await getSettings();
-    logoSrc = settings.CompanyLogo || "/images/logo.png";
+    const settings = await Promise.race([
+      getSettings(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+    ]);
+    if (settings?.CompanyLogo) logoSrc = settings.CompanyLogo;
   } catch {
-    logoSrc = "/images/logo.png";
+    logoSrc = DEFAULT_LOGO;
   }
   return (
     <main className="min-h-screen bg-ifra-mist dark:bg-ifra-deep">

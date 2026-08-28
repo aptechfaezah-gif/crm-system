@@ -27,17 +27,20 @@ export function LoginForm() {
   const [state, action] = useActionState(loginAction, { error: undefined as string | undefined });
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("https://api.ipify.org?format=json")
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    fetch("https://api.ipify.org?format=json", { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { ip?: string } | null) => {
-        if (!cancelled && data?.ip) setPublicIp(data.ip);
+        if (!controller.signal.aborted && data?.ip) setPublicIp(data.ip);
       })
       .catch(() => {
         /* connection IP is used as fallback */
-      });
+      })
+      .finally(() => clearTimeout(timer));
     return () => {
-      cancelled = true;
+      controller.abort();
+      clearTimeout(timer);
     };
   }, []);
 

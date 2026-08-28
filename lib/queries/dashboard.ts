@@ -1,45 +1,15 @@
 import { sql, query, execute } from "@/lib/db";
 import { leadScope } from "@/lib/queries/leads";
 import { hasPermission } from "@/lib/permissions";
-import { notify } from "@/lib/notifications";
 import type { SessionUser } from "@/types";
+
+const reminderSyncAt = new Map<number, number>();
+const REMINDER_SYNC_MS = 5 * 60 * 1000;
 
 export async function getDashboardData(session: SessionUser) {
   const scope = leadScope(session);
 
-  const [cards] = await query<{
-    TotalLeads: number;
-    NewLeads: number;
-    Contacted: number;
-    Qualified: number;
-    FollowUpsToday: number;
-    ActiveProposals: number;
-    WonLeads: number;
-    LostLeads: number;
-  }>(
-    `
-    SELECT
-      (SELECT COUNT(*) FROM Leads l WHERE l.IsDeleted = 0 ${scope.clause}) AS TotalLeads,
-      (SELECT COUNT(*) FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-        WHERE l.IsDeleted = 0 AND st.Name = N'New' ${scope.clause}) AS NewLeads,
-      (SELECT COUNT(*) FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-        WHERE l.IsDeleted = 0 AND st.Name = N'Contacted' ${scope.clause}) AS Contacted,
-      (SELECT COUNT(*) FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-        WHERE l.IsDeleted = 0 AND st.Name = N'Qualified' ${scope.clause}) AS Qualified,
-      (SELECT COUNT(*) FROM FollowUps f INNER JOIN Leads l ON l.Id = f.LeadId
-        WHERE l.IsDeleted = 0 AND f.Status = N'Pending'
-          AND CAST(f.FollowUpDate AS DATE) = CAST(GETDATE() AS DATE) ${scope.clause}) AS FollowUpsToday,
-      (SELECT COUNT(*) FROM Proposals p INNER JOIN Leads l ON l.Id = p.LeadId
-        WHERE l.IsDeleted = 0 AND p.Status IN (N'Draft', N'Sent', N'Viewed') ${scope.clause}) AS ActiveProposals,
-      (SELECT COUNT(*) FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-        WHERE l.IsDeleted = 0 AND st.Name = N'Won' ${scope.clause}) AS WonLeads,
-      (SELECT COUNT(*) FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-        WHERE l.IsDeleted = 0 AND st.Name = N'Lost' ${scope.clause}) AS LostLeads
-    `,
-    scope.params,
-  );
-
-  const [byStatus, bySource, byService, monthly, wonLost, employee, recent, followups] = await Promise.all([
+  const [byStatus, bySource, byService, monthly, employee, recent, followups, proposalRows] = await Promise.all([
     query<{ Name: string; Total: number }>(
       `SELECT st.Name, COUNT(*) AS Total
        FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
@@ -65,19 +35,14 @@ export async function getDashboardData(session: SessionUser) {
       scope.params,
     ),
     query<{ MonthLabel: string; Total: number }>(
-      `SELECT FORMAT(l.CreatedAt, 'yyyy-MM') AS MonthLabel, COUNT(*) AS Total
+      `SELECT CONCAT(YEAR(l.CreatedAt), N'-', RIGHT(CONCAT(N'0', MONTH(l.CreatedAt)), 2)) AS MonthLabel,
+              COUNT(*) AS Total
        FROM Leads l
-       WHERE l.IsDeleted = 0 AND l.CreatedAt >= DATEADD(MONTH, -11, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1))
+       WHERE l.IsDeleted = 0
+         AND l.CreatedAt >= DATEADD(MONTH, -11, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1))
          ${scope.clause}
-       GROUP BY FORMAT(l.CreatedAt, 'yyyy-MM')
-       ORDER BY MonthLabel`,
-      scope.params,
-    ),
-    query<{ Name: string; Total: number }>(
-      `SELECT st.Name, COUNT(*) AS Total
-       FROM Leads l INNER JOIN LeadStatuses st ON st.Id = l.StatusId
-       WHERE l.IsDeleted = 0 AND st.Name IN (N'Won', N'Lost') ${scope.clause}
-       GROUP BY st.Name`,
+       GROUP BY YEAR(l.CreatedAt), MONTH(l.CreatedAt)
+       ORDER BY YEAR(l.CreatedAt), MONTH(l.CreatedAt)`,
       scope.params,
     ),
     query<{ Name: string; Total: number; Won: number }>(
@@ -109,34 +74,44 @@ export async function getDashboardData(session: SessionUser) {
       `SELECT f.Id, f.FollowUpDate, f.FollowUpTime, f.FollowUpType, f.Status, f.Subject,
               l.Id AS LeadId, l.LeadCode, l.FirstName, l.LastName, l.CompanyName, u.Name AS AssignedName,
               CASE
-                WHEN CAST(f.FollowUpDate AS DATE) < CAST(GETDATE() AS DATE) THEN N'Overdue'
-                WHEN CAST(f.FollowUpDate AS DATE) = CAST(GETDATE() AS DATE) THEN N'Today'
+                WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'Overdue'
+                WHEN f.FollowUpDate < DATEADD(DAY, 1, CAST(GETDATE() AS DATE)) THEN N'Today'
                 ELSE N'Upcoming'
               END AS Bucket
        FROM FollowUps f
        INNER JOIN Leads l ON l.Id = f.LeadId
        INNER JOIN Users u ON u.Id = f.UserId
        WHERE l.IsDeleted = 0 AND f.Status = N'Pending' ${scope.clause}
-         AND CAST(f.FollowUpDate AS DATE) <= DATEADD(DAY, 7, CAST(GETDATE() AS DATE))
+         AND f.FollowUpDate < DATEADD(DAY, 8, CAST(GETDATE() AS DATE))
        ORDER BY f.FollowUpDate, f.FollowUpTime`,
+      scope.params,
+    ),
+    query<{ Total: number }>(
+      `SELECT COUNT(*) AS Total
+       FROM Proposals p INNER JOIN Leads l ON l.Id = p.LeadId
+       WHERE l.IsDeleted = 0 AND p.Status IN (N'Draft', N'Sent', N'Viewed') ${scope.clause}`,
       scope.params,
     ),
   ]);
 
-  const total = Number(cards?.TotalLeads || 0);
-  const won = Number(cards?.WonLeads || 0);
+  const statusCount = (name: string) => Number(byStatus.find((row) => row.Name === name)?.Total || 0);
+  const total = byStatus.reduce((sum, row) => sum + Number(row.Total || 0), 0);
+  const won = statusCount("Won");
   const conversionRate = total > 0 ? Number(((won / total) * 100).toFixed(1)) : 0;
+  const wonLost = byStatus
+    .filter((row) => row.Name === "Won" || row.Name === "Lost")
+    .map((row) => ({ Name: row.Name, Total: Number(row.Total) }));
 
   return {
     cards: {
       totalLeads: total,
-      newLeads: Number(cards?.NewLeads || 0),
-      contacted: Number(cards?.Contacted || 0),
-      qualified: Number(cards?.Qualified || 0),
-      followUpsToday: Number(cards?.FollowUpsToday || 0),
-      activeProposals: Number(cards?.ActiveProposals || 0),
+      newLeads: statusCount("New"),
+      contacted: statusCount("Contacted"),
+      qualified: statusCount("Qualified"),
+      followUpsToday: followups.filter((row) => row.Bucket === "Today").length,
+      activeProposals: Number(proposalRows[0]?.Total || 0),
       wonLeads: won,
-      lostLeads: Number(cards?.LostLeads || 0),
+      lostLeads: statusCount("Lost"),
       conversionRate,
     },
     charts: { byStatus, bySource, byService, monthly, wonLost, employee },
@@ -146,74 +121,71 @@ export async function getDashboardData(session: SessionUser) {
 }
 
 export async function syncFollowUpReminders(session: SessionUser) {
+  const last = reminderSyncAt.get(session.id) || 0;
+  if (Date.now() - last < REMINDER_SYNC_MS) return;
+  reminderSyncAt.set(session.id, Date.now());
+
   const scope = leadScope(session);
-  const due = await query<{ Id: number; UserId: number; LeadId: number; Client: string; Bucket: string }>(
-    `SELECT f.Id, f.UserId, f.LeadId,
-            CONCAT(l.FirstName, N' ', ISNULL(l.LastName, N'')) AS Client,
-            CASE WHEN CAST(f.FollowUpDate AS DATE) < CAST(GETDATE() AS DATE) THEN N'Overdue' ELSE N'Due' END AS Bucket
-     FROM FollowUps f
-     INNER JOIN Leads l ON l.Id = f.LeadId
-     WHERE l.IsDeleted = 0 AND f.Status = N'Pending'
-       AND CAST(f.FollowUpDate AS DATE) <= CAST(GETDATE() AS DATE)
-       ${scope.clause}`,
-    scope.params,
-  );
+  const taskParams = hasPermission(session.role, "leads.view_all")
+    ? {}
+    : ({ scopeUser: { type: sql.Int, value: session.id } } as Record<string, import("@/lib/db").SqlParam>);
+  const taskScope = hasPermission(session.role, "leads.view_all") ? "" : " AND t.AssignedTo = @scopeUser ";
 
-  for (const item of due) {
-    const type = item.Bucket === "Overdue" ? "Follow-up Overdue" : "Follow-up Due";
-    const existing = await query<{ Id: number }>(
-      `SELECT TOP 1 Id FROM Notifications
-       WHERE UserId = @userId AND Type = @type AND ReferenceId = @ref
-         AND CAST(CreatedAt AS DATE) = CAST(GETDATE() AS DATE)`,
-      {
-        userId: { type: sql.Int, value: item.UserId },
-        type: { type: sql.NVarChar(50), value: type },
-        ref: { type: sql.Int, value: item.LeadId },
-      },
+  try {
+    await execute(
+      `INSERT INTO Notifications (UserId, Title, Message, Type, ReferenceId, IsRead, CreatedAt)
+       SELECT f.UserId,
+              CASE WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'Follow-up Overdue' ELSE N'Follow-up Due' END,
+              CONCAT(
+                CASE WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'Follow-up Overdue' ELSE N'Follow-up Due' END,
+                N' for ',
+                LTRIM(RTRIM(CONCAT(l.FirstName, N' ', ISNULL(l.LastName, N''))))
+              ),
+              CASE WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'Follow-up Overdue' ELSE N'Follow-up Due' END,
+              f.LeadId,
+              0,
+              GETDATE()
+       FROM FollowUps f
+       INNER JOIN Leads l ON l.Id = f.LeadId
+       WHERE l.IsDeleted = 0 AND f.Status = N'Pending'
+         AND f.FollowUpDate < DATEADD(DAY, 1, CAST(GETDATE() AS DATE))
+         ${scope.clause}
+         AND NOT EXISTS (
+           SELECT 1 FROM Notifications n
+           WHERE n.UserId = f.UserId
+             AND n.ReferenceId = f.LeadId
+             AND n.CreatedAt >= CAST(GETDATE() AS DATE)
+             AND n.Type = CASE WHEN f.FollowUpDate < CAST(GETDATE() AS DATE) THEN N'Follow-up Overdue' ELSE N'Follow-up Due' END
+         )`,
+      scope.params,
     );
-    if (existing.length === 0) {
-      await notify({
-        userId: item.UserId,
-        title: type,
-        message: `${type.replace("Follow-up ", "Follow-up ")} for ${item.Client.trim()}`,
-        type,
-        referenceId: item.LeadId,
-      });
-    }
-  }
 
-  const taskDue = await query<{ Id: number; AssignedTo: number; Title: string; LeadId: number }>(
-    `SELECT t.Id, t.AssignedTo, t.Title, t.LeadId
-     FROM Tasks t
-     INNER JOIN Leads l ON l.Id = t.LeadId
-     WHERE l.IsDeleted = 0 AND t.Status IN (N'Pending', N'In Progress')
-       AND CAST(t.DueDate AS DATE) <= CAST(GETDATE() AS DATE)
-       ${hasPermission(session.role, "leads.view_all") ? "" : " AND t.AssignedTo = @scopeUser "}`,
-    hasPermission(session.role, "leads.view_all")
-      ? {}
-      : ({ scopeUser: { type: sql.Int, value: session.id } } as Record<string, import("@/lib/db").SqlParam>),
-  );
-
-  for (const task of taskDue) {
-    const existing = await query<{ Id: number }>(
-      `SELECT TOP 1 Id FROM Notifications
-       WHERE UserId = @userId AND Type = N'Task Due' AND ReferenceId = @ref
-         AND CAST(CreatedAt AS DATE) = CAST(GETDATE() AS DATE)`,
-      {
-        userId: { type: sql.Int, value: task.AssignedTo },
-        ref: { type: sql.Int, value: task.Id },
-      },
+    await execute(
+      `INSERT INTO Notifications (UserId, Title, Message, Type, ReferenceId, IsRead, CreatedAt)
+       SELECT t.AssignedTo,
+              N'Task due',
+              CONCAT(N'Task "', t.Title, N'" is due.'),
+              N'Task Due',
+              t.Id,
+              0,
+              GETDATE()
+       FROM Tasks t
+       INNER JOIN Leads l ON l.Id = t.LeadId
+       WHERE l.IsDeleted = 0 AND t.Status IN (N'Pending', N'In Progress')
+         AND t.DueDate < DATEADD(DAY, 1, CAST(GETDATE() AS DATE))
+         ${taskScope}
+         AND NOT EXISTS (
+           SELECT 1 FROM Notifications n
+           WHERE n.UserId = t.AssignedTo
+             AND n.Type = N'Task Due'
+             AND n.ReferenceId = t.Id
+             AND n.CreatedAt >= CAST(GETDATE() AS DATE)
+         )`,
+      taskParams,
     );
-    if (existing.length === 0) {
-      await notify({
-        userId: task.AssignedTo,
-        title: "Task due",
-        message: `Task "${task.Title}" is due.`,
-        type: "Task Due",
-        referenceId: task.Id,
-      });
-    }
+  } catch (error) {
+    reminderSyncAt.delete(session.id);
+    console.error("Failed to sync follow-up reminders");
+    console.error(error);
   }
-
-  void execute;
 }

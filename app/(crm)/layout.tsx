@@ -11,9 +11,13 @@ export default async function CrmLayout({ children }: { children: React.ReactNod
   let unread = 0;
   let logoSrc = "/images/logo.png";
   try {
-    notifications = (await getNotifications(session.id)) as typeof notifications;
-    unread = Number(await getUnreadCount(session.id));
-    const settings = await getSettings();
+    const [rows, unreadCount, settings] = await Promise.all([
+      getNotifications(session.id),
+      getUnreadCount(session.id),
+      getSettings(),
+    ]);
+    notifications = rows as typeof notifications;
+    unread = Number(unreadCount);
     logoSrc = settings.CompanyLogo || "/images/logo.png";
   } catch {
     notifications = [];

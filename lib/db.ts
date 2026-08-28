@@ -7,6 +7,7 @@ export type SqlParam = {
 
 let pool: sql.ConnectionPool | null = null;
 let connecting: Promise<sql.ConnectionPool> | null = null;
+let shutdownBound = false;
 
 function getConfig(): sql.config {
   const user = process.env.DB_USER;
@@ -36,25 +37,52 @@ function getConfig(): sql.config {
       useUTC: true,
     },
     pool: {
-      max: 10,
-      min: 2,
-      idleTimeoutMillis: 30000,
+      max: 12,
+      min: 0,
+      idleTimeoutMillis: 10000,
+      acquireTimeoutMillis: 8000,
     },
-    connectionTimeout: 15000,
-    requestTimeout: 30000,
+    connectionTimeout: 8000,
+    requestTimeout: 20000,
   };
 }
 
+async function closeQuietly(target: sql.ConnectionPool | null) {
+  if (!target) return;
+  try {
+    await target.close();
+  } catch {
+    // already closed or broken
+  }
+}
+
+function bindShutdown() {
+  if (shutdownBound || typeof process === "undefined") return;
+  shutdownBound = true;
+  const close = () => {
+    void closeQuietly(pool);
+    pool = null;
+  };
+  process.once("SIGTERM", close);
+  process.once("beforeExit", close);
+}
+
 export async function getPool(): Promise<sql.ConnectionPool> {
+  bindShutdown();
   if (pool?.connected) return pool;
   if (connecting) return connecting;
 
+  const dead = pool;
+  pool = null;
+
   connecting = (async () => {
+    await closeQuietly(dead);
     const next = new sql.ConnectionPool(getConfig());
     next.on("error", (err) => {
       console.error("SQL Server pool error");
       console.error(err);
-      pool = null;
+      if (pool === next) pool = null;
+      void closeQuietly(next);
     });
     await next.connect();
     pool = next;

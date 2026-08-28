@@ -11,6 +11,7 @@ import { resolveClientIp } from "@/lib/client-ip";
 import { safeErrorMessage } from "@/lib/utils";
 import { assertPermission, hasPermission } from "@/lib/permissions";
 import { lookupSchema, settingsSchema, userSchema } from "@/lib/validation";
+import { invalidateSettingsCache } from "@/lib/queries/leads";
 import type { ActionResult } from "@/types";
 
 async function saveCompanyLogoFile(file: File): Promise<string> {
@@ -252,6 +253,7 @@ export async function saveSettingsAction(formData: FormData): Promise<ActionResu
         propPrefix: { type: sql.NVarChar(20), value: data.proposalPrefix },
       },
     );
+    invalidateSettingsCache();
     revalidatePath("/settings");
     revalidatePath("/login");
     revalidatePath("/dashboard");

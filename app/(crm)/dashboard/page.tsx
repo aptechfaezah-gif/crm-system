@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { after } from "next/server";
 import { Eye, Pencil } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { DashboardCharts } from "@/components/dashboard/charts";
@@ -12,7 +13,9 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const session = await requireAuth();
   try {
-    await syncFollowUpReminders(session);
+    after(() => {
+      void syncFollowUpReminders(session);
+    });
     const data = await getDashboardData(session);
     const cards = [
       ["Total Leads", data.cards.totalLeads],
