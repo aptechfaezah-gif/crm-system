@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ifra-navy: #0a2351;
+  --ifra-gold: #fbb03b;
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-height: 100%;
+  max-width: 100%;
+}
+
+body {
+  @apply bg-ifra-mist text-slate-800 dark:bg-ifra-deep dark:text-slate-100;
+  overflow-x: hidden;
+}
+
+*:focus-visible {
+  @apply outline-none ring-2 ring-ifra-gold ring-offset-2 ring-offset-white dark:ring-offset-ifra-deep;
+}
+
+.ifra-card {
+  @apply rounded-xl border border-slate-200 bg-white shadow-card dark:border-white/10 dark:bg-ifra-navy/60;
+}
+
+.ifra-input {
+  @apply h-10 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm leading-5 text-slate-800 placeholder:text-slate-400
+    dark:border-white/10 dark:bg-ifra-deep/80 dark:text-slate-100;
+}
+
+.ifra-label {
+  @apply mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300;
+}
+
+.ifra-btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60;
+}
+
+.ifra-btn-primary {
+  @apply ifra-btn bg-ifra-navy text-white hover:bg-ifra-mid dark:bg-ifra-gold dark:text-ifra-navy dark:hover:bg-ifra-gold-dark;
+}
+
+.ifra-btn-gold {
+  @apply ifra-btn bg-ifra-gold text-ifra-navy hover:bg-ifra-gold-dark;
+}
+
+.ifra-btn-ghost {
+  @apply ifra-btn border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-white/10 dark:bg-transparent dark:text-slate-200 dark:hover:bg-white/5;
+}
+
+.ifra-btn-danger {
+  @apply ifra-btn bg-rose-600 text-white hover:bg-rose-700;
+}
+
+table.data-table {
+  @apply w-full text-left text-sm;
+  width: max-content;
+  min-width: 100%;
+}
+
+table.data-table th {
+  @apply whitespace-nowrap border-b border-slate-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:border-white/10 dark:text-slate-300;
+}
+
+table.data-table td {
+  @apply whitespace-nowrap border-b border-slate-100 px-3 py-2 align-middle dark:border-white/10;
+}
+
+table.data-table thead th {
+  @apply sticky top-0 z-10 bg-white dark:bg-ifra-navy;
+}
+
+.table-scroll,
+.ifra-card:has(> table.data-table),
+.ifra-card:has(> .max-h-\[70vh\]) {
+  @apply overflow-auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  table.data-table th,
+  table.data-table td {
+    @apply px-2 py-2 text-[13px];
+  }
+
+  table.data-table th:first-child,
+  table.data-table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 11;
+    box-shadow: 8px 0 8px -8px rgba(10, 35, 81, 0.18);
+  }
+
+  table.data-table tbody td:first-child {
+    @apply bg-white dark:bg-[#0A2351];
+  }
+
+  table.data-table thead th:first-child {
+    z-index: 12;
+    @apply bg-white dark:bg-ifra-navy;
+  }
+
+  .ifra-card {
+    @apply rounded-lg;
+  }
+
+  .ifra-btn,
+  .ifra-btn-primary,
+  .ifra-btn-gold,
+  .ifra-btn-ghost,
+  .ifra-btn-danger {
+    @apply min-h-10 px-3;
+  }
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #c5d0e0;
+  border-radius: 999px;
+}
