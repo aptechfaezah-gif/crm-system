@@ -73,7 +73,7 @@ npm run dev
 9. Open:
 
 ```text
-http://localhost:3000
+http://localhost:3100
 ```
 
 You will be redirected to `/login` if you are not authenticated, or `/dashboard` if you are.
